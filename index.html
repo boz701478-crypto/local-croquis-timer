@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>Local Croquis Timer (Line of Action Style)</title>
+    <style>
+        /* 全体の背景を暗くし、スクロールバーを消す */
+        body { margin: 0; background-color: #1a1a1a; color: white; font-family: sans-serif; overflow: hidden; }
+        
+        /* 初期設定画面の中央配置 */
+        #setup { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center; z-index: 10; background: rgba(0,0,0,0.8); padding: 40px; border-radius: 12px;}
+        
+        /* 画像を画面いっぱいに表示（見切れないようにcontainを指定） */
+        #image-container { width: 100vw; height: 100vh; display: flex; justify-content: center; align-items: center; }
+        img { max-width: 100%; max-height: 100%; object-fit: contain; display: none; }
+        
+        /* 常駐タイマー */
+        #timer-display { 
+            position: absolute; 
+            top: 20px; 
+            right: 20px; 
+            font-size: 36px; 
+            font-weight: bold;
+            background: rgba(0, 0, 0, 0.6); 
+            padding: 10px 20px; 
+            border-radius: 8px; 
+            display: none; 
+            pointer-events: none;
+            transition: color 0.3s ease; /* 色が変わる時のアニメーション */
+        }
+
+        /* -------------------------------------
+           追加：コントロールパネル（Line of action風）
+        -------------------------------------- */
+        #controls-display {
+            position: absolute;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.6); /* 半透明で画像の邪魔をしない */
+            padding: 10px 20px;
+            border-radius: 30px;
+            display: none;
+            gap: 15px;
+            align-items: center;
+        }
+
+        .ctrl-btn {
+            background: none;
+            border: none;
+            color: white;
+            font-size: 24px;
+            cursor: pointer;
+            padding: 5px 15px;
+            border-radius: 5px;
+            transition: background 0.2s;
+        }
+
+        .ctrl-btn:hover { background: rgba(255, 255, 255, 0.2); }
+        .ctrl-btn.end { color: #ff4d4d; font-size: 16px; font-weight: bold; }
+        
+        /* 初期画面の装飾 */
+        input[type="file"] { margin-bottom: 20px; font-size: 16px; }
+        button.start-btn { padding: 12px 30px; font-size: 18px; cursor: pointer; background-color: #4CAF50; color: white; border: none; border-radius: 8px; font-weight: bold;}
+        button.start-btn:hover { background-color: #45a049; }
+    </style>
+</head>
+<body>
+    <div id="setup">
+        <h2>クロッキータイマー</h2>
+        <input type="file" id="file-input" multiple accept="image/*"><br><br>
+        <label>1枚あたりの秒数: <input type="number" id="time-input" value="30" style="width: 70px; font-size: 18px; text-align:center;"></label><br><br>
+        <label style="font-size: 18px;"><input type="checkbox" id="random-checkbox" checked style="transform: scale(1.5); margin-right: 10px;"> ランダムな順番で表示</label><br><br>
+        <button id="start-btn" class="start-btn">スタート</button>
+    </div>
+
+    <div id="timer-display">00:30</div>
+
+    <div id="controls-display">
+        <button id="end-btn" class="ctrl-btn end" title="終了 (Esc)">終了</button>
+        <button id="prev-btn" class="ctrl-btn" title="前の画像 (←)">◀</button>
+        <button id="pause-btn" class="ctrl-btn" title="一時停止/再生 (Space)">⏸</button>
+        <button id="next-btn" class="ctrl-btn" title="次の画像 (→)">▶</button>
+    </div>
+
+    <div id="image-container"><img id="display-img"></div>
+
+    <script>
+        let images = [];
+        let currentIndex = 0;
+        let timeLimit = 30;
+        let timeLeft = 0;
+        let timerInterval = null;
+        let isPaused = false; // 追加：一時停止フラグ
+
+        // 【機能】メインのアラーム音（終了時）
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        function playBeep() {
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            const oscillator = audioCtx.createOscillator();
+            const gainNode = audioCtx.createGain();
+            oscillator.type = 'sine';
+            oscillator.frequency.setValueAtTime(880, audioCtx.currentTime); // A5の音
+            gainNode.gain.setValueAtTime(0.1, audioCtx.currentTime);
+            oscillator.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+            oscillator.start();
+            gainNode.gain.exponentialRampToValueAtTime(0.00001, audioCtx.currentTime + 0.4);
+            oscillator.stop(audioCtx.currentTime + 0.4);
+        }
+
+        // 【追加機能】残り時間わずかの警告音（ピッという短い音）
+        function playWarningBeep() {
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            const oscillator = audioCtx.createOscillator();
+            const gainNode = audioCtx.createGain();
+            oscillator.type = 'sine';
+            oscillator.frequency.setValueAtTime(1000, audioCtx.currentTime); // 少し高めの音
+            gainNode.gain.setValueAtTime(0.05, audioCtx.currentTime); // 少し小さめ
+            oscillator.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+            oscillator.start();
+            gainNode.gain.exponentialRampToValueAtTime(0.00001, audioCtx.currentTime + 0.1);
+            oscillator.stop(audioCtx.currentTime + 0.1);
+        }
+
+        // スタート処理
+        document.getElementById('start-btn').addEventListener('click', () => {
+            const files = document.getElementById('file-input').files;
+            if (files.length === 0) { alert('画像ファイルを選択してください！'); return; }
+
+            images = Array.from(files).map(file => URL.createObjectURL(file));
+
+            if (document.getElementById('random-checkbox').checked) {
+                for (let i = images.length - 1; i > 0; i--) {
+                    const j = Math.floor(Math.random() * (i + 1));
+                    [images[i], images[j]] = [images[j], images[i]];
+                }
+            }
+
+            timeLimit = parseInt(document.getElementById('time-input').value, 10);
+            
+            // UI表示の切り替え
+            document.getElementById('setup').style.display = 'none';
+            document.getElementById('timer-display').style.display = 'block';
+            document.getElementById('controls-display').style.display = 'flex'; // コントロール表示
+            document.getElementById('display-img').style.display = 'block';
+
+            currentIndex = 0;
+            isPaused = false;
+            
+            playBeep(); 
+            showImage();
+        });
+
+        // 画像とタイマーの処理
+        function showImage() {
+            if (currentIndex >= images.length) {
+                alert('すべての画像の描画が終了しました！お疲れ様でした。');
+                location.reload(); 
+                return;
+            }
+            if (currentIndex < 0) currentIndex = 0; // 0未満に行かないようガード
+            
+            document.getElementById('display-img').src = images[currentIndex];
+            timeLeft = timeLimit;
+            updateTimerUI();
+
+            clearInterval(timerInterval);
+            timerInterval = setInterval(() => {
+                if (isPaused) return; // 一時停止中はカウントを減らさない
+
+                timeLeft--;
+                updateTimerUI();
+                
+                // 【追加機能】残り5秒以下になったら警告音
+                if (timeLeft <= 5 && timeLeft > 0 && timeLimit > 5) {
+                    playWarningBeep();
+                }
+
+                if (timeLeft <= 0) {
+                    clearInterval(timerInterval);
+                    playBeep(); 
+                    currentIndex++;
+                    showImage(); 
+                }
+            }, 1000);
+        }
+
+        // タイマーUIの更新と赤字変化
+        function updateTimerUI() {
+            const m = String(Math.floor(timeLeft / 60)).padStart(2, '0');
+            const s = String(timeLeft % 60).padStart(2, '0');
+            const timerEl = document.getElementById('timer-display');
+            
+            timerEl.innerText = `${m}:${s}`;
+
+            // 【追加機能】残り5秒以下で赤色にする
+            if (timeLeft <= 5 && timeLimit > 5) {
+                timerEl.style.color = '#ff4d4d'; // 赤色
+            } else {
+                timerEl.style.color = 'white'; // 通常色
+            }
+        }
+
+        // -------------------------------------
+        // 追加：コントロールパネルの操作ロジック
+        // -------------------------------------
+        
+        // 一時停止 / 再生
+        function togglePause() {
+            isPaused = !isPaused;
+            document.getElementById('pause-btn').innerText = isPaused ? "⏵" : "⏸";
+        }
+        document.getElementById('pause-btn').addEventListener('click', togglePause);
+
+        // 次へ
+        function goNext() {
+            if(images.length === 0) return;
+            currentIndex++;
+            showImage();
+        }
+        document.getElementById('next-btn').addEventListener('click', goNext);
+
+        // 前へ
+        function goPrev() {
+            if(images.length === 0 || currentIndex === 0) return;
+            currentIndex--;
+            showImage();
+        }
+        document.getElementById('prev-btn').addEventListener('click', goPrev);
+
+        // 終了
+        function endSession() {
+            if (confirm("クロッキーを終了して初期画面に戻りますか？")) {
+                location.reload();
+            }
+        }
+        document.getElementById('end-btn').addEventListener('click', endSession);
+
+        // -------------------------------------
+        // 追加：キーボードショートカット
+        // -------------------------------------
+        document.addEventListener('keydown', (e) => {
+            // 初期画面（画像が読み込まれていない状態）では無効化
+            if (images.length === 0) return;
+
+            switch(e.code) {
+                case 'Space':
+                    e.preventDefault(); // 画面スクロールを防ぐ
+                    togglePause();
+                    break;
+                case 'ArrowRight':
+                    goNext();
+                    break;
+                case 'ArrowLeft':
+                    goPrev();
+                    break;
+                case 'Escape':
+                    endSession();
+                    break;
+            }
+        });
+    </script>
+</body>
+</html>
